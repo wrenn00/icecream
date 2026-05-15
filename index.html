@@ -19,17 +19,16 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
+    user-select: none;
   }
 
-  /* 점수 영역 */
   #score-area {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
   }
-
   #score {
     font-size: 48px;
     font-weight: 700;
@@ -37,14 +36,12 @@
     color: #2C2C2C;
     line-height: 1;
   }
-
   #best-score {
     font-size: 13px;
     color: #AAAAAA;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
   }
 
-  /* 캔버스 래퍼 */
   #canvas-wrapper {
     position: relative;
     width: 400px;
@@ -52,16 +49,32 @@
     border: 1px solid #EEEEEE;
     background: #FAFAFA;
     cursor: crosshair;
+    flex-shrink: 0;
   }
-
-  /* Matter.js 가 삽입할 canvas */
+  /* Matter.js 삽입 canvas */
   #canvas-wrapper canvas {
     display: block;
+    position: absolute;
+    top: 0; left: 0;
     width: 100% !important;
     height: 100% !important;
   }
+  /* 흔들리는 고슴도치 + 드롭된 고슴도치를 그릴 overlay canvas */
+  #overlay {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
 
-  /* 모바일 반응형 */
+  #hint {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #BBBBBB;
+    letter-spacing: 0.2px;
+  }
+
   @media (max-width: 480px) {
     #canvas-wrapper {
       width: 100vw;
@@ -80,104 +93,379 @@
   <div id="best-score">최고 0</div>
 </div>
 
-<div id="canvas-wrapper" id="game-canvas"></div>
+<div id="canvas-wrapper">
+  <!-- Matter.js 가 <canvas>를 여기에 삽입함 -->
+  <canvas id="overlay"></canvas>
+</div>
+
+<div id="hint">클릭 또는 스페이스바로 떨어뜨리기</div>
 
 <script>
-  const { Engine, Render, Runner, World, Bodies, Events, Body } = Matter;
+// ═══════════════════════════════════════════════════════════
+// 상수
+// ═══════════════════════════════════════════════════════════
+const W = 400, H = 600;
+const WALL_T  = 50;
+const HOG_R   = 28;
+const SWING_Y = 50;                     // 흔들리는 고슴도치 y
+const SWING_AMP = W * 0.35;            // 좌우 진폭
+const SWING_SPEED = 0.0018;            // 각속도 (rad/ms)
+const DROP_COOLDOWN = 1000;            // ms — 연속 드롭 방지
 
-  // ── 캔버스 크기 ───────────────────────────────────────────
-  const wrapper  = document.getElementById('canvas-wrapper');
-  const W = 400;
-  const H = 600;
-  const WALL_T = 50;   // 벽 두께
+const COLORS = ['#E8B4A0', '#D4A574', '#B8C5D6', '#C5B8A5', '#E0C9B8'];
 
-  // ── 엔진 & 렌더러 ─────────────────────────────────────────
-  const engine = Engine.create({ gravity: { y: 1 } });
-  const world  = engine.world;
+// ═══════════════════════════════════════════════════════════
+// Matter.js 셋업
+// ═══════════════════════════════════════════════════════════
+const { Engine, Render, Runner, World, Bodies, Events, Body } = Matter;
 
-  const render = Render.create({
-    element: wrapper,
-    engine:  engine,
-    options: {
-      width:      W,
-      height:     H,
-      background: '#FAFAFA',
-      wireframes: false,
+const wrapper = document.getElementById('canvas-wrapper');
+const engine  = Engine.create({ gravity: { y: 1 } });
+const world   = engine.world;
+
+const render = Render.create({
+  element: wrapper,
+  engine:  engine,
+  options: {
+    width:      W,
+    height:     H,
+    background: '#FAFAFA',
+    wireframes: false,
+  }
+});
+
+// 경계 (투명, 물리만 존재)
+World.add(world, [
+  Bodies.rectangle(W / 2,        H + WALL_T / 2, W + WALL_T * 2, WALL_T, { isStatic: true, render: { fillStyle: 'transparent' } }),
+  Bodies.rectangle(-WALL_T / 2,  H / 2,          WALL_T, H,              { isStatic: true, render: { fillStyle: 'transparent' } }),
+  Bodies.rectangle(W + WALL_T/2, H / 2,          WALL_T, H,              { isStatic: true, render: { fillStyle: 'transparent' } }),
+]);
+
+Render.run(render);
+Runner.run(Runner.create(), engine);
+
+// ═══════════════════════════════════════════════════════════
+// Overlay Canvas (고슴도치 커스텀 렌더링)
+// ═══════════════════════════════════════════════════════════
+const overlay = document.getElementById('overlay');
+// overlay를 Matter canvas 위로 올리기 위해 z-index 설정
+overlay.style.zIndex = '10';
+
+function resizeOverlay() {
+  overlay.width  = wrapper.clientWidth;
+  overlay.height = wrapper.clientHeight;
+}
+resizeOverlay();
+window.addEventListener('resize', resizeOverlay);
+
+const ctx = overlay.getContext('2d');
+
+// ═══════════════════════════════════════════════════════════
+// 색상 유틸
+// ═══════════════════════════════════════════════════════════
+// hex → hsl로 변환해서 명도 조정
+function darkenHex(hex, amount = 0.15) {
+  let r = parseInt(hex.slice(1,3),16)/255;
+  let g = parseInt(hex.slice(3,5),16)/255;
+  let b = parseInt(hex.slice(5,7),16)/255;
+  const max=Math.max(r,g,b), min=Math.min(r,g,b);
+  let h, s, l = (max+min)/2;
+  if (max===min) { h=s=0; }
+  else {
+    const d=max-min;
+    s = l>0.5 ? d/(2-max-min) : d/(max+min);
+    switch(max){
+      case r: h=((g-b)/d+(g<b?6:0))/6; break;
+      case g: h=((b-r)/d+2)/6; break;
+      default:h=((r-g)/d+4)/6;
     }
-  });
+  }
+  l = Math.max(0, l - amount);
+  // hsl → rgb
+  function hue2rgb(p,q,t){
+    if(t<0)t+=1; if(t>1)t-=1;
+    if(t<1/6)return p+(q-p)*6*t;
+    if(t<1/2)return q;
+    if(t<2/3)return p+(q-p)*(2/3-t)*6;
+    return p;
+  }
+  const q2 = l<0.5 ? l*(1+s) : l+s-l*s;
+  const p2  = 2*l - q2;
+  r = hue2rgb(p2,q2,h+1/3);
+  g = hue2rgb(p2,q2,h);
+  b = hue2rgb(p2,q2,h-1/3);
+  return `rgb(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)})`;
+}
 
-  // ── 정적 경계: 바닥 + 좌우 벽 ────────────────────────────
-  const ground = Bodies.rectangle(W / 2, H + WALL_T / 2, W, WALL_T, {
-    isStatic: true,
-    label: 'ground',
-    render: { fillStyle: 'transparent' }
-  });
-  const wallL = Bodies.rectangle(-WALL_T / 2, H / 2, WALL_T, H, {
-    isStatic: true,
-    label: 'wall-left',
-    render: { fillStyle: 'transparent' }
-  });
-  const wallR = Bodies.rectangle(W + WALL_T / 2, H / 2, WALL_T, H, {
-    isStatic: true,
-    label: 'wall-right',
-    render: { fillStyle: 'transparent' }
-  });
+// ═══════════════════════════════════════════════════════════
+// 고슴도치 그리기
+// ═══════════════════════════════════════════════════════════
+//  cx, cy: 물리 좌표 → 화면 픽셀 좌표로 변환된 값
+//  angle: 라디안 (Body.angle)
+//  r: 반지름 (픽셀)
+function drawHedgehog(cx, cy, angle, color, r) {
+  const spineColor = darkenHex(color, 0.15);
 
-  World.add(world, [ground, wallL, wallR]);
+  // 물리 좌표 → overlay 픽셀 좌표 변환 비율
+  const sx = overlay.width  / W;
+  const sy = overlay.height / H;
+  const px = cx * sx;
+  const py = cy * sy;
+  const pr = r  * Math.min(sx, sy);
 
-  // ── 런너 & 렌더 시작 ──────────────────────────────────────
-  Render.run(render);
-  const runner = Runner.create();
-  Runner.run(runner, engine);
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(angle);
 
-  // ── 클릭 시 원 드롭 (테스트용) ───────────────────────────
-  wrapper.addEventListener('click', (e) => {
-    const rect = wrapper.getBoundingClientRect();
-    // 실제 픽셀 → 물리 좌표 변환 (반응형 대응)
-    const scaleX = W / rect.width;
-    const scaleY = H / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top)  * scaleY;
+  // ── 가시 (10시~2시 방향, 10개) ──────────────────────────
+  const SPINE_COUNT = 10;
+  const ANG_START = -160 * Math.PI / 180;   // 10시
+  const ANG_END   =  -20 * Math.PI / 180;   // 2시
+  for (let i = 0; i < SPINE_COUNT; i++) {
+    const t   = i / (SPINE_COUNT - 1);
+    const ang = ANG_START + t * (ANG_END - ANG_START);
+    const spineL = pr * 0.38;               // 몸통 반지름의 38%
+    const bx = Math.cos(ang) * pr;
+    const by = Math.sin(ang) * pr;
+    const tx = Math.cos(ang) * (pr + spineL);
+    const ty = Math.sin(ang) * (pr + spineL);
+    // 물방울 모양 — 끝점으로 좁아지는 둥근 획
+    ctx.beginPath();
+    ctx.moveTo(bx, by);
+    ctx.lineTo(tx, ty);
+    ctx.strokeStyle = spineColor;
+    ctx.lineWidth   = pr * 0.22;
+    ctx.lineCap     = 'round';
+    ctx.stroke();
+  }
 
-    const circle = Bodies.circle(x, y, 30, {
-      restitution: 0.3,   // 탄성
-      friction:    0.5,
-      density:     0.002,
-      render: {
-        fillStyle:   '#E8B4A0',
-        strokeStyle: 'none',
-        lineWidth:   0,
+  // ── 몸통 ─────────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.arc(0, 0, pr, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  // ── 볼터치 ───────────────────────────────────────────────
+  ctx.globalAlpha = 0.25;
+  ctx.fillStyle = '#FF9999';
+  ctx.beginPath(); ctx.arc(-pr * 0.34, pr * 0.18, pr * 0.22, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( pr * 0.34, pr * 0.18, pr * 0.22, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  // ── 눈 ───────────────────────────────────────────────────
+  // 눈 위치: 몸통 중심보다 약간 위
+  const eyeY  = -pr * 0.12;
+  const eyeX  =  pr * 0.28;
+  const eyeR  =  pr * 0.11;
+
+  ctx.fillStyle = '#2C2C2C';
+  ctx.beginPath(); ctx.arc(-eyeX, eyeY, eyeR, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( eyeX, eyeY, eyeR, 0, Math.PI * 2); ctx.fill();
+
+  // 눈 하이라이트
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath(); ctx.arc(-eyeX + eyeR*0.3, eyeY - eyeR*0.3, eyeR*0.38, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc( eyeX + eyeR*0.3, eyeY - eyeR*0.3, eyeR*0.38, 0, Math.PI*2); ctx.fill();
+
+  // ── 코 ───────────────────────────────────────────────────
+  ctx.fillStyle = '#2C2C2C';
+  ctx.beginPath();
+  ctx.ellipse(0, eyeY + pr * 0.28, pr * 0.08, pr * 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ── 표정 오버레이 (dropHedgehog는 현재 happy만, 확장 여지) ──
+function drawFace(cx, cy, angle, color, r, face) {
+  // drawHedgehog가 이미 기본(happy) 얼굴을 그림
+  // face에 따른 눈 변형은 아래에서 처리
+  const sx = overlay.width  / W;
+  const sy = overlay.height / H;
+  const px = cx * sx;
+  const py = cy * sy;
+  const pr = r  * Math.min(sx, sy);
+
+  const eyeY = -pr * 0.12;
+  const eyeX =  pr * 0.28;
+  const eyeR =  pr * 0.11;
+
+  if (face === 'happy') return; // 기본 원 눈 이미 그려짐
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(angle);
+
+  // 기존 눈 덮어쓰기 (몸통 색으로)
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.arc(-eyeX, eyeY, eyeR * 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( eyeX, eyeY, eyeR * 1.4, 0, Math.PI * 2); ctx.fill();
+
+  ctx.strokeStyle = '#2C2C2C';
+  ctx.lineWidth   = pr * 0.09;
+  ctx.lineCap     = 'round';
+
+  if (face === 'sleepy') {
+    // ‿ 곡선
+    [-eyeX, eyeX].forEach(ex => {
+      ctx.beginPath();
+      ctx.arc(ex, eyeY - eyeR * 0.5, eyeR, 0, Math.PI);
+      ctx.stroke();
+    });
+  } else if (face === 'sassy') {
+    // 가로 타원
+    ctx.fillStyle = '#2C2C2C';
+    ctx.beginPath(); ctx.ellipse(-eyeX, eyeY, eyeR * 1.5, eyeR * 0.55, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse( eyeX, eyeY, eyeR * 1.5, eyeR * 0.55, 0, 0, Math.PI*2); ctx.fill();
+  } else if (face === 'excited') {
+    // 동그란 눈 + 작은 반짝임 (★ 4개 선분)
+    ctx.fillStyle = '#2C2C2C';
+    ctx.beginPath(); ctx.arc(-eyeX, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc( eyeX, eyeY, eyeR, 0, Math.PI*2); ctx.fill();
+    // 반짝임
+    const sparkR = eyeR * 1.1;
+    [[-eyeX + sparkR, eyeY - sparkR], [eyeX + sparkR, eyeY - sparkR]].forEach(([sx2, sy2]) => {
+      ctx.strokeStyle = '#2C2C2C';
+      ctx.lineWidth   = pr * 0.07;
+      for (let k = 0; k < 4; k++) {
+        const a = k * Math.PI / 4;
+        const d = eyeR * 0.55;
+        ctx.beginPath();
+        ctx.moveTo(sx2, sy2);
+        ctx.lineTo(sx2 + Math.cos(a) * d, sy2 + Math.sin(a) * d);
+        ctx.stroke();
       }
     });
-    World.add(world, circle);
-  });
-
-  // ── 점수 (현재는 누적 드롭 횟수) ─────────────────────────
-  let score = 0;
-  let best  = parseInt(localStorage.getItem('hs_best') || '0');
-  const scoreEl = document.getElementById('score');
-  const bestEl  = document.getElementById('best-score');
-  bestEl.textContent = `최고 ${best}`;
-
-  wrapper.addEventListener('click', () => {
-    score++;
-    scoreEl.textContent = score;
-    if (score > best) {
-      best = score;
-      localStorage.setItem('hs_best', best);
-      bestEl.textContent = `최고 ${best}`;
-    }
-  });
-
-  // ── 반응형: Matter render 크기 조정 ──────────────────────
-  function resize() {
-    const w = wrapper.clientWidth;
-    const h = wrapper.clientHeight;
-    render.canvas.style.width  = w + 'px';
-    render.canvas.style.height = h + 'px';
   }
-  window.addEventListener('resize', resize);
-  resize();
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════
+// 게임 상태
+// ═══════════════════════════════════════════════════════════
+let droppedBodies = [];       // 떨어진 Matter.js Body 목록
+let swingTime     = 0;        // requestAnimationFrame 타임스탬프 누적
+let nextColor     = randomColor();
+let isDropping    = false;    // 연속 드롭 방지 플래그
+let dropTimer     = null;
+
+function randomColor() {
+  return COLORS[Math.floor(Math.random() * COLORS.length)];
+}
+
+// 현재 흔들리는 고슴도치의 물리 X 좌표
+function swingX(time) {
+  return W / 2 + Math.sin(time * SWING_SPEED) * SWING_AMP;
+}
+
+// ═══════════════════════════════════════════════════════════
+// 드롭
+// ═══════════════════════════════════════════════════════════
+function drop() {
+  if (isDropping) return;
+  isDropping = true;
+
+  const x     = swingX(swingTime);
+  const color = nextColor;
+
+  const body = Bodies.circle(x, SWING_Y, HOG_R, {
+    restitution: 0.25,
+    friction:    0.6,
+    density:     0.002,
+    label: 'hedgehog',
+    // Matter 기본 렌더는 투명으로 — 우리가 직접 그림
+    render: { fillStyle: 'transparent', strokeStyle: 'transparent', lineWidth: 0 },
+    // 커스텀 속성
+    hogColor: color,
+    hogFace:  'happy',
+  });
+
+  World.add(world, body);
+  droppedBodies.push(body);
+
+  // 다음 고슴도치 준비 (딜레이 0.5s)
+  if (dropTimer) clearTimeout(dropTimer);
+  dropTimer = setTimeout(() => {
+    nextColor  = randomColor();
+    isDropping = false;
+  }, 500);
+}
+
+// ═══════════════════════════════════════════════════════════
+// 입력
+// ═══════════════════════════════════════════════════════════
+wrapper.addEventListener('click', drop);
+
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowDown') {
+    e.preventDefault();
+    drop();
+  }
+});
+
+// 터치 지원
+wrapper.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  drop();
+}, { passive: false });
+
+// ═══════════════════════════════════════════════════════════
+// 점수
+// ═══════════════════════════════════════════════════════════
+let score = 0;
+let best  = parseInt(localStorage.getItem('hs_best') || '0');
+const scoreEl = document.getElementById('score');
+const bestEl  = document.getElementById('best-score');
+bestEl.textContent = `최고 ${best}`;
+
+function addScore(n = 1) {
+  score += n;
+  scoreEl.textContent = score;
+  if (score > best) {
+    best = score;
+    localStorage.setItem('hs_best', best);
+    bestEl.textContent = `최고 ${best}`;
+  }
+}
+
+// 드롭할 때마다 +1 (임시 — 다음 단계에서 정교한 점수 로직)
+wrapper.addEventListener('click', () => { if (!isDropping) addScore(); });
+
+// ═══════════════════════════════════════════════════════════
+// 메인 루프 — overlay에 직접 그리기
+// ═══════════════════════════════════════════════════════════
+let lastTs = 0;
+
+function loop(ts) {
+  const dt = ts - lastTs;
+  lastTs   = ts;
+  swingTime += dt;
+
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  // 1. 이미 떨어진 고슴도치들 그리기
+  for (const body of droppedBodies) {
+    drawHedgehog(
+      body.position.x,
+      body.position.y,
+      body.angle,
+      body.hogColor,
+      HOG_R
+    );
+  }
+
+  // 2. 흔들리는 대기 고슴도치 (물리 X, 그림으로만)
+  if (!isDropping) {
+    const sx2 = swingX(swingTime);
+    // 흔들리는 방향에 따라 살짝 기울기
+    const tilt = Math.cos(swingTime * SWING_SPEED) * 0.2;
+    drawHedgehog(sx2, SWING_Y, tilt, nextColor, HOG_R);
+  }
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
