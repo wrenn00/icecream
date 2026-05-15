@@ -10,7 +10,7 @@
 
   body {
     font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #FFFFFF;
+    background: #FAFAFA;
     color: #2C2C2C;
     width: 100vw;
     height: 100vh;
@@ -36,9 +36,10 @@
     width: 500px;
     height: 700px;
     flex-shrink: 0;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.04);
   }
 
-  /* Matter.js 가 삽입하는 canvas */
+  /* Matter.js 삽입 canvas */
   #canvas-wrapper canvas {
     display: block;
     position: absolute;
@@ -46,23 +47,51 @@
     width: 100% !important;
     height: 100% !important;
     border: 1px solid #F0F0F0;
+    background: #FFFFFF;
+  }
+
+  /* 하단 UI: 카운터 + 리셋 */
+  #ui-bottom {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 4px;
+    z-index: 10;
+    pointer-events: none;
   }
 
   #counter {
-    position: absolute;
-    right: 10px;
-    bottom: 10px;
     font-size: 12px;
     color: #BBBBBB;
     letter-spacing: 0.3px;
-    pointer-events: none;
-    z-index: 10;
+    transform-origin: right center;
+    transition: transform 0.2s cubic-bezier(0.36, 1.56, 0.64, 1);
   }
+  #counter.pop { transform: scale(1.3); }
 
+  #reset-btn {
+    font-size: 11px;
+    color: #CCCCCC;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 0;
+    font-family: inherit;
+    letter-spacing: 0.3px;
+    pointer-events: auto;
+    transition: color 0.15s;
+  }
+  #reset-btn:hover { color: #888888; }
+
+  /* 반응형 */
   @media (max-width: 540px) {
     #canvas-wrapper { width: 100vw; height: calc(100vw * 1.4); }
+    body { background: #FFFFFF; }
   }
-  @media (max-height: 800px) {
+  @media (max-height: 820px) {
     #canvas-wrapper {
       width: min(500px, 90vw);
       height: min(700px, calc(min(500px, 90vw) * 1.4));
@@ -74,39 +103,43 @@
 <body>
 
 <div id="title">Hedgehog Pile</div>
+
 <div id="canvas-wrapper">
-  <div id="counter">쌓은 개수: 0</div>
+  <div id="ui-bottom">
+    <div id="counter">쌓은 개수: 0</div>
+    <button id="reset-btn">초기화</button>
+  </div>
 </div>
 
 <script>
 // ═══════════════════════════════════════════════════════════
 // 상수
 // ═══════════════════════════════════════════════════════════
-const W      = 500;
-const H      = 700;
-const WALL_T = 60;
-const HOG_R  = 40;
-const WALL_H = 20000;
+const W = 500, H = 700;
+const WALL_T = 60, HOG_R = 40, WALL_H = 24000;
 
-// 대기 고슴도치 위치 (world 좌표)
-const IDLE_X  = W / 2;
-const IDLE_Y  = 65;
-const IDLE_AMP   = 5;      // 둥둥 진폭 (px)
-const IDLE_PERIOD = 2000;  // 둥둥 주기 (ms)
+const IDLE_X       = W / 2;
+const IDLE_Y_SCR   = 68;     // 화면 상단으로부터 idle 고슴도치까지 (screen px)
+const IDLE_AMP_V   = 5;      // 위아래 진폭
+const IDLE_AMP_H   = 3;      // 좌우 진폭
+const IDLE_PERIOD_V = 2000;  // 위아래 주기 ms
+const IDLE_PERIOD_H = 3000;  // 좌우 주기 ms
 
-// 안정 판정
-const STABLE_SPD = 0.1;
-const STABLE_MS  = 500;
+const STABLE_SPD = 0.10;     // 안정 판정 속도 임계값
+const STABLE_MS  = 500;      // 안정 유지 시간
+const CAM_LERP   = 0.05;     // 카메라 보간 계수
+const CAM_PAD    = H * 0.40; // 최고점을 화면 40% 지점에 배치
 
 // ═══════════════════════════════════════════════════════════
-// Matter.js 셋업
+// Matter.js 셋업 (enableSleeping → 많이 쌓여도 성능 유지)
 // ═══════════════════════════════════════════════════════════
 const { Engine, Render, Runner, World, Bodies, Body, Events } = Matter;
 
 const wrapper   = document.getElementById('canvas-wrapper');
 const counterEl = document.getElementById('counter');
+const resetBtn  = document.getElementById('reset-btn');
 
-const engine = Engine.create({ gravity: { y: 1 } });
+const engine = Engine.create({ gravity: { y: 1 }, enableSleeping: true });
 const world  = engine.world;
 
 const render = Render.create({
@@ -120,23 +153,16 @@ const render = Render.create({
   }
 });
 
-World.add(world, [
-  // 바닥
-  Bodies.rectangle(W/2, H + WALL_T/2, W + WALL_T*2, WALL_T, {
-    isStatic: true, label: 'ground',
-    render: { fillStyle: 'transparent' },
-  }),
-  // 좌벽
-  Bodies.rectangle(-WALL_T/2, H/2 - WALL_H/2, WALL_T, WALL_H, {
-    isStatic: true, label: 'wall-l',
-    render: { fillStyle: 'transparent' },
-  }),
-  // 우벽
-  Bodies.rectangle(W + WALL_T/2, H/2 - WALL_H/2, WALL_T, WALL_H, {
-    isStatic: true, label: 'wall-r',
-    render: { fillStyle: 'transparent' },
-  }),
-]);
+// 경계 (정적, 영구)
+const boundaries = [
+  Bodies.rectangle(W/2, H+WALL_T/2, W+WALL_T*2, WALL_T,
+    { isStatic:true, label:'ground', render:{fillStyle:'transparent'} }),
+  Bodies.rectangle(-WALL_T/2, H/2-WALL_H/2, WALL_T, WALL_H,
+    { isStatic:true, label:'wall-l', render:{fillStyle:'transparent'} }),
+  Bodies.rectangle(W+WALL_T/2, H/2-WALL_H/2, WALL_T, WALL_H,
+    { isStatic:true, label:'wall-r', render:{fillStyle:'transparent'} }),
+];
+World.add(world, boundaries);
 
 Render.run(render);
 const runner = Runner.create();
@@ -147,76 +173,90 @@ Runner.run(runner, engine);
 // ═══════════════════════════════════════════════════════════
 const hogImage = new Image();
 hogImage.src = 'wh.png';
-hogImage.onerror = () => console.warn('wh.png 로드 실패 — 폴백으로 원 사용');
+hogImage.onerror = () => console.warn('wh.png 로드 실패 — 폴백 원 사용');
 
 // ═══════════════════════════════════════════════════════════
-// 좌표 변환 유틸
-// world 좌표 ↔ canvas 픽셀 (반응형 대응)
+// 카메라
 // ═══════════════════════════════════════════════════════════
+// camY: 화면 최상단이 대응하는 world y 값 (0 이하)
+let camY = 0, camTargetY = 0;
+
+// ═══════════════════════════════════════════════════════════
+// 좌표 변환
+// ═══════════════════════════════════════════════════════════
+// 마우스/터치 클라이언트 좌표 → world 좌표
 function clientToWorld(clientX, clientY) {
-  const rect  = render.canvas.getBoundingClientRect();
-  const scaleX = W / rect.width;
-  const scaleY = H / rect.height;
+  const rect = render.canvas.getBoundingClientRect();
   return {
-    x: (clientX - rect.left) * scaleX,
-    y: (clientY - rect.top)  * scaleY,
+    x: (clientX - rect.left) * (W / rect.width),
+    y: (clientY - rect.top)  * (H / rect.height) + camY,
   };
 }
 
 // ═══════════════════════════════════════════════════════════
-// 고슴도치 그리기 (world 좌표)
+// 고슴도치 그리기 (screen 좌표 기준)
 // ═══════════════════════════════════════════════════════════
-function drawHedgehog(ctx, x, y, angle, r, alpha = 1, scale = 1) {
+function drawHedgehog(ctx, sx, sy, angle, r, alpha = 1, scale = 1) {
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.translate(x, y);
+  ctx.translate(sx, sy);
   ctx.rotate(angle);
   ctx.scale(scale, scale);
 
   if (hogImage.complete && hogImage.naturalWidth > 0) {
     ctx.drawImage(hogImage, -r, -r, r * 2, r * 2);
   } else {
-    // 폴백: 살구색 원
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fillStyle = '#E8B4A0';
     ctx.fill();
   }
-
   ctx.restore();
 }
 
 // ═══════════════════════════════════════════════════════════
-// 떨어진 고슴도치 목록
+// 게임 상태
 // ═══════════════════════════════════════════════════════════
 const hedgehogs = []; // { body, stableTimer, counted }
 let stableCount = 0;
+let latestBody  = null;
+
+let isDragging = false;
+let isDropped  = false;
+let dragX = IDLE_X, dragY = 0;  // world 좌표
+let idleAlpha = 1;
+let idleTime  = 0;
+let lastTs    = 0;
+
+// 첫 드롭 가이드 텍스트 alpha (처음 1→0 으로 fade)
+let guideAlpha = 1;
+
+// ── idle 고슴도치 화면 위치 (screen y 기준) ───────────────
+function idleScreenX() {
+  return IDLE_X + Math.sin((idleTime / IDLE_PERIOD_H) * Math.PI * 2) * IDLE_AMP_H;
+}
+function idleScreenY() {
+  return IDLE_Y_SCR + Math.sin((idleTime / IDLE_PERIOD_V) * Math.PI * 2) * IDLE_AMP_V;
+}
+// idle 고슴도치 world y (카메라 반영)
+function idleWorldY() { return camY + idleScreenY(); }
 
 // ═══════════════════════════════════════════════════════════
-// 드래그 상태
+// Hit test (world 좌표 입력)
 // ═══════════════════════════════════════════════════════════
-let isDragging  = false;   // 현재 드래그 중
-let isDropped   = false;   // 방금 드롭함 (새 대기 고슴도치 재등장 대기)
-let dragX = IDLE_X;        // 드래그 중 고슴도치 world x
-let dragY = IDLE_Y;        // 드래그 중 고슴도치 world y
-let idleAlpha  = 1;        // 대기 고슴도치 투명도 (재등장 fade)
-let idleTime   = 0;        // 대기 고슴도치 둥둥 시간
-let lastTs     = 0;
-
-// 현재 대기 고슴도치 y (둥둥 효과)
-function idleCurrentY() {
-  return IDLE_Y + Math.sin((idleTime / IDLE_PERIOD) * Math.PI * 2) * IDLE_AMP;
+function hitIdle(wx, wy) {
+  if (isDropped || isDragging) return false;
+  return Math.hypot(wx - IDLE_X, wy - idleWorldY()) <= HOG_R * 1.2;
 }
 
 // ═══════════════════════════════════════════════════════════
-// 충격파 효과
+// 충격파
 // ═══════════════════════════════════════════════════════════
-const pulses = []; // { x, y, startTs, maxR }
-const PULSE_MS   = 300;
-const PULSE_MAXR = 60;
+const pulses = []; // { wx, wy, startTs }
+const PULSE_MS = 300, PULSE_MAXR = 60;
 
-function spawnPulse(x, y) {
-  pulses.push({ x, y, startTs: performance.now() });
+function spawnPulse(wx, wy) {
+  pulses.push({ wx, wy, startTs: performance.now() });
 }
 
 function drawPulses(ctx, now) {
@@ -224,77 +264,93 @@ function drawPulses(ctx, now) {
     const p = pulses[i];
     const t = (now - p.startTs) / PULSE_MS;
     if (t >= 1) { pulses.splice(i, 1); continue; }
-
-    const radius = t * PULSE_MAXR;
-    const alpha  = (1 - t) * 0.6;
-
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+    ctx.globalAlpha = (1 - t) * 0.55;
     ctx.strokeStyle = '#E8B4A0';
     ctx.lineWidth   = 1;
-    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.arc(p.wx, p.wy - camY, t * PULSE_MAXR, 0, Math.PI * 2);
     ctx.stroke();
     ctx.restore();
   }
 }
 
 // ═══════════════════════════════════════════════════════════
+// 배경 가이드라인
+// ═══════════════════════════════════════════════════════════
+function drawGuideLines(ctx) {
+  const step = 100;
+  const firstLine = Math.floor(camY / step) * step;
+  ctx.save();
+  ctx.strokeStyle = '#F5F5F5';
+  ctx.lineWidth   = 1;
+  ctx.setLineDash([3, 6]);
+  for (let wy = firstLine; wy <= camY + H + step; wy += step) {
+    const sy = wy - camY;
+    if (sy < -1 || sy > H + 1) continue;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.lineTo(W, sy);
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════
 // 드롭 → Body 생성
 // ═══════════════════════════════════════════════════════════
+let firstDrop = true;
+
 function dropHedgehog(wx, wy) {
-  const angle    = (Math.random() - 0.5) * 0.6;   // -0.3 ~ 0.3 rad
-  const angVel   = (Math.random() - 0.5) * 0.1;   // -0.05 ~ 0.05
+  const angle  = (Math.random() - 0.5) * 0.6;
+  const angVel = (Math.random() - 0.5) * 0.1;
 
   const body = Bodies.circle(wx, wy, HOG_R, {
-    restitution: 0.4,
-    friction:    0.6,
-    density:     0.002,
-    label: 'hedgehog',
-    render: { fillStyle: 'transparent', strokeStyle: 'transparent', lineWidth: 0 },
-    angle: angle,
+    restitution:    0.4,
+    friction:       0.6,
+    density:        0.002,
+    sleepThreshold: 60,
+    label:          'hedgehog',
+    render:         { fillStyle:'transparent', strokeStyle:'transparent', lineWidth:0 },
+    angle:          angle,
   });
-
-  // 초기 회전 속도와 아래 방향 속도
   Body.setAngularVelocity(body, angVel);
   Body.setVelocity(body, { x: 0, y: 1 });
 
   World.add(world, body);
   hedgehogs.push({ body, stableTimer: 0, counted: false });
+  latestBody = body;
 
   isDragging = false;
   isDropped  = true;
 
-  // 0.5초 후 대기 고슴도치 재등장 (fade in)
-  setTimeout(() => {
-    dragX      = IDLE_X;
-    dragY      = idleCurrentY();
-    idleAlpha  = 0;
-    isDropped  = false;
-
-    // fade in 200ms
-    const fadeStart = performance.now();
-    function fadeIn(ts) {
-      const t = Math.min((ts - fadeStart) / 200, 1);
-      idleAlpha = t;
-      if (t < 1) requestAnimationFrame(fadeIn);
+  // 가이드 텍스트 첫 드롭 시 fade out
+  if (firstDrop) {
+    firstDrop = false;
+    if (guideAlpha > 0) {
+      const t0 = performance.now();
+      (function fadeGuide(ts) {
+        guideAlpha = Math.max(0, 1 - (ts - t0) / 300);
+        if (guideAlpha > 0) requestAnimationFrame(fadeGuide);
+      })(performance.now());
     }
-    requestAnimationFrame(fadeIn);
+  }
+
+  // 0.5초 후 대기 고슴도치 재등장 (fade in 200ms)
+  setTimeout(() => {
+    idleAlpha = 0;
+    isDropped = false;
+    const t0 = performance.now();
+    (function fadeIn(ts) {
+      idleAlpha = Math.min((ts - t0) / 200, 1);
+      if (idleAlpha < 1) requestAnimationFrame(fadeIn);
+    })(performance.now());
   }, 500);
 }
 
 // ═══════════════════════════════════════════════════════════
-// Hit test: 포인터가 대기 고슴도치 위인지 (world 좌표)
-// ═══════════════════════════════════════════════════════════
-function hitIdle(wx, wy) {
-  const cy = !isDragging && !isDropped ? idleCurrentY() : dragY;
-  const dx = wx - (isDragging ? dragX : IDLE_X);
-  const dy = wy - cy;
-  return Math.hypot(dx, dy) <= HOG_R * 1.3;  // 약간 넉넉하게
-}
-
-// ═══════════════════════════════════════════════════════════
-// 입력 이벤트
+// 입력
 // ═══════════════════════════════════════════════════════════
 const canvas = render.canvas;
 
@@ -304,17 +360,25 @@ canvas.addEventListener('mousedown', e => {
   const { x, y } = clientToWorld(e.clientX, e.clientY);
   if (hitIdle(x, y)) {
     isDragging = true;
-    dragX = x;
-    dragY = y;
+    dragX = x; dragY = y;
     canvas.style.cursor = 'grabbing';
   }
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (isDragging || isDropped) return;
+  const { x, y } = clientToWorld(e.clientX, e.clientY);
+  canvas.style.cursor = hitIdle(x, y) ? 'grab' : 'default';
+});
+
+canvas.addEventListener('mouseleave', () => {
+  if (!isDragging) canvas.style.cursor = 'default';
 });
 
 window.addEventListener('mousemove', e => {
   if (!isDragging) return;
   const { x, y } = clientToWorld(e.clientX, e.clientY);
-  dragX = x;
-  dragY = y;
+  dragX = x; dragY = y;
 });
 
 window.addEventListener('mouseup', e => {
@@ -332,8 +396,7 @@ canvas.addEventListener('touchstart', e => {
   const { x, y } = clientToWorld(t.clientX, t.clientY);
   if (hitIdle(x, y)) {
     isDragging = true;
-    dragX = x;
-    dragY = y;
+    dragX = x; dragY = y;
   }
 }, { passive: false });
 
@@ -342,8 +405,7 @@ window.addEventListener('touchmove', e => {
   e.preventDefault();
   const t = e.changedTouches[0];
   const { x, y } = clientToWorld(t.clientX, t.clientY);
-  dragX = x;
-  dragY = y;
+  dragX = x; dragY = y;
 }, { passive: false });
 
 window.addEventListener('touchend', e => {
@@ -355,53 +417,67 @@ window.addEventListener('touchend', e => {
 }, { passive: false });
 
 // ═══════════════════════════════════════════════════════════
-// 충돌 감지 → 충격파 + 작은 흔들림
+// 충돌 → 충격파 + 미세 흔들림
 // ═══════════════════════════════════════════════════════════
-// 방금 드롭된 body 추적 (충돌 감지 대상)
-let latestBody = null;
-
 Events.on(engine, 'collisionStart', event => {
-  const pairs = event.pairs;
-  for (const pair of pairs) {
-    const { bodyA, bodyB } = pair;
-
-    // 새로 드롭된 hedgehog 관련 충돌만 처리
-    const isLatest =
-      bodyA === latestBody || bodyB === latestBody;
-    if (!isLatest) continue;
-
-    // 충돌 지점 계산 (두 body 중심의 중간)
+  for (const { bodyA, bodyB } of event.pairs) {
+    if (bodyA !== latestBody && bodyB !== latestBody) continue;
     const cx = (bodyA.position.x + bodyB.position.x) / 2;
     const cy = (bodyA.position.y + bodyB.position.y) / 2;
     spawnPulse(cx, cy);
-
-    // 상대방 body에 미세한 랜덤 힘 적용
     const other = bodyA === latestBody ? bodyB : bodyA;
     if (!other.isStatic) {
-      const fx = (Math.random() - 0.5) * 0.002;
-      const fy = (Math.random() - 0.5) * 0.001;
-      Body.applyForce(other, other.position, { x: fx, y: fy });
+      Body.applyForce(other, other.position, {
+        x: (Math.random() - 0.5) * 0.002,
+        y: (Math.random() - 0.5) * 0.001,
+      });
     }
   }
 });
 
-// dropHedgehog에서 body 생성 후 latestBody 갱신 (수정 버전)
-const _originalDrop = dropHedgehog;
-// 아래 afterRender 루프에서 가장 최근 body를 latestBody로 업데이트
+// ═══════════════════════════════════════════════════════════
+// 초기화
+// ═══════════════════════════════════════════════════════════
+function resetAll() {
+  for (const { body } of hedgehogs) World.remove(world, body);
+  hedgehogs.length = 0;
+  pulses.length    = 0;
+  stableCount      = 0;
+  counterEl.textContent = '쌓은 개수: 0';
+  camY = 0; camTargetY = 0;
+  latestBody  = null;
+  isDragging  = false;
+  isDropped   = false;
+  idleAlpha   = 1;
+  idleTime    = 0;
+}
+resetBtn.addEventListener('click', resetAll);
 
 // ═══════════════════════════════════════════════════════════
-// afterRender 루프
+// afterRender — 메인 그리기 루프
 // ═══════════════════════════════════════════════════════════
 Events.on(render, 'afterRender', () => {
   const ctx = render.context;
   const now = performance.now();
-
-  // dt 계산 (둥둥 타이머)
   const dt  = lastTs > 0 ? Math.min(now - lastTs, 50) : 0;
   lastTs    = now;
+
+  // idle 타이머
   if (!isDropped && !isDragging) idleTime += dt;
 
-  // 1. 안정도 체크 → 카운터
+  // ── 카메라 업데이트 ──────────────────────────────────────
+  if (hedgehogs.length > 0) {
+    let highestY = H;
+    for (const { body } of hedgehogs) {
+      if (body.position.y < highestY) highestY = body.position.y;
+    }
+    camTargetY = Math.min(0, highestY - CAM_PAD);
+  } else {
+    camTargetY = 0;
+  }
+  camY += (camTargetY - camY) * CAM_LERP;
+
+  // ── 안정도 체크 → 카운터 ────────────────────────────────
   for (const entry of hedgehogs) {
     if (entry.counted) continue;
     const spd = Math.hypot(entry.body.velocity.x, entry.body.velocity.y);
@@ -412,57 +488,69 @@ Events.on(render, 'afterRender', () => {
         entry.counted = true;
         stableCount++;
         counterEl.textContent = `쌓은 개수: ${stableCount}`;
+        // 카운터 팝 애니메이션
+        counterEl.classList.remove('pop');
+        void counterEl.offsetWidth;
+        counterEl.classList.add('pop');
+        setTimeout(() => counterEl.classList.remove('pop'), 200);
       }
     } else {
       entry.stableTimer = 0;
     }
   }
 
-  // latestBody 갱신
-  if (hedgehogs.length > 0) {
-    latestBody = hedgehogs[hedgehogs.length - 1].body;
+  // ── 가이드라인 ───────────────────────────────────────────
+  drawGuideLines(ctx);
+
+  // ── 떨어진 고슴도치 (world → screen 변환: sy = worldY - camY) ──
+  for (const { body } of hedgehogs) {
+    drawHedgehog(ctx, body.position.x, body.position.y - camY, body.angle, HOG_R);
   }
 
-  // 2. 떨어진 고슴도치 그리기
-  for (const entry of hedgehogs) {
-    const b = entry.body;
-    drawHedgehog(ctx, b.position.x, b.position.y, b.angle, HOG_R);
-  }
-
-  // 3. 충격파
+  // ── 충격파 ──────────────────────────────────────────────
   drawPulses(ctx, now);
 
-  // 4. 대기 고슴도치 (드래그 중 또는 idle)
+  // ── 대기 / 드래그 고슴도치 ──────────────────────────────
   if (!isDropped) {
-    const drawX  = isDragging ? dragX : IDLE_X;
-    const drawY  = isDragging ? dragY : idleCurrentY();
-    const scale  = isDragging ? 1.05 : 1.0;
-    const angle  = 0;
-
-    // 드래그 중 옅은 그림자
     if (isDragging) {
+      // 드래그: world → screen
       ctx.save();
-      ctx.shadowColor   = 'rgba(0,0,0,0.12)';
-      ctx.shadowBlur    = 16;
-      ctx.shadowOffsetY = 6;
-      drawHedgehog(ctx, drawX, drawY, angle, HOG_R, idleAlpha, scale);
+      ctx.shadowColor   = 'rgba(0,0,0,0.10)';
+      ctx.shadowBlur    = 18;
+      ctx.shadowOffsetY = 7;
+      drawHedgehog(ctx, dragX, dragY - camY, 0, HOG_R, idleAlpha, 1.05);
       ctx.restore();
     } else {
-      drawHedgehog(ctx, drawX, drawY, angle, HOG_R, idleAlpha, scale);
-    }
+      // idle: 화면 고정 위치
+      const isx = idleScreenX();
+      const isy = idleScreenY();
+      drawHedgehog(ctx, isx, isy, 0, HOG_R, idleAlpha, 1.0);
 
-    // 드래그 커서 힌트 (idle 상태일 때 테두리 원)
-    if (!isDragging && idleAlpha > 0.5) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(IDLE_X, idleCurrentY(), HOG_R + 4, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(232,180,160,0.4)';
-      ctx.lineWidth   = 1.5;
-      ctx.setLineDash([4, 6]);
-      ctx.globalAlpha = idleAlpha;
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
+      // grab 힌트 점선 링
+      if (idleAlpha > 0.4) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(isx, isy, HOG_R + 5, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(232,180,160,0.38)';
+        ctx.lineWidth   = 1.5;
+        ctx.setLineDash([4, 6]);
+        ctx.globalAlpha = idleAlpha;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // 가이드 텍스트 (첫 드롭 전)
+      if (guideAlpha > 0) {
+        ctx.save();
+        ctx.globalAlpha   = guideAlpha * idleAlpha;
+        ctx.fillStyle     = '#AAAAAA';
+        ctx.font          = '13px system-ui,-apple-system,sans-serif';
+        ctx.textAlign     = 'left';
+        ctx.textBaseline  = 'middle';
+        ctx.fillText('드래그해서 놓아주세요', isx + HOG_R + 10, isy);
+        ctx.restore();
+      }
     }
   }
 });
