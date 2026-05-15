@@ -86,6 +86,25 @@
   }
   #reset-btn:hover { color: #888888; }
 
+  /* 로딩 오버레이 */
+  #loading-screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #FFFFFF;
+    font-size: 13px;
+    color: #AAAAAA;
+    letter-spacing: 0.5px;
+    z-index: 50;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+  }
+  #loading-screen.hidden {
+    opacity: 0;
+  }
+
   /* 반응형 */
   @media (max-width: 540px) {
     #canvas-wrapper { width: 100vw; height: calc(100vw * 1.4); }
@@ -109,6 +128,7 @@
     <div id="counter">쌓은 개수: 0</div>
     <button id="reset-btn">초기화</button>
   </div>
+  <div id="loading-screen">Loading...</div>
 </div>
 
 <script>
@@ -160,7 +180,7 @@ const render = Render.create({
 // 카메라가 위로 올라갈 때도 막힘 없게 함
 // 이전 코드 버그: WALL_H=24000, 중심 y = H/2 - WALL_H/2 = -11650
 //   → 벽 하단 y = -11650 + 12000 = 350  ← 바닥(730)까지 못 닿음!
-// 수정: 중심을 y=0(월드 원점)으로, 높이 30000 → 벽 하단 y=15000 > 730 ✓
+// 수정: 중심을 y=0(월드 원점)으로, 높이 30000 → 벽 하단 y=15000 > 730
 
 const WALL_THICK = 50;
 const WALL_TALL  = 30000;   // 상하 충분히 긴 벽
@@ -205,11 +225,36 @@ const runner = Runner.create();
 Runner.run(runner, engine);
 
 // ═══════════════════════════════════════════════════════════
-// 이미지 로드
+// 이미지 시스템 — 7종 프리로드
 // ═══════════════════════════════════════════════════════════
-const hogImage = new Image();
-hogImage.src = 'wh.png';
-hogImage.onerror = () => console.warn('wh.png 로드 실패 — 폴백 원 사용');
+const IMAGE_NAMES = ['wh', 'ww', 'wa', 'we', 'wr', 'wt', 'ws'];
+const hedgehogImages = {};   // { 'wh': HTMLImageElement, ... }
+let imagesLoaded = false;
+let currentWaitingImage = null;   // 현재 대기 중인 고슴도치 이미지
+
+const loadingScreen = document.getElementById('loading-screen');
+
+function getRandomImage() {
+  const name = IMAGE_NAMES[Math.floor(Math.random() * IMAGE_NAMES.length)];
+  return hedgehogImages[name] ?? hedgehogImages[IMAGE_NAMES[0]] ?? null;
+}
+
+async function loadImages() {
+  const promises = IMAGE_NAMES.map(name => new Promise(resolve => {
+    const img = new Image();
+    img.onload  = () => { hedgehogImages[name] = img; resolve(); };
+    img.onerror = () => { console.warn(`${name}.png 로드 실패 — 스킵`); resolve(); };
+    img.src = `${name}.png`;
+  }));
+  await Promise.all(promises);
+  imagesLoaded = true;
+  currentWaitingImage = getRandomImage();
+  // 로딩 완료 → 오버레이 숨김
+  loadingScreen.classList.add('hidden');
+  setTimeout(() => loadingScreen.remove(), 400);
+}
+
+loadImages();
 
 // ═══════════════════════════════════════════════════════════
 // 카메라
@@ -231,17 +276,20 @@ function clientToWorld(clientX, clientY) {
 
 // ═══════════════════════════════════════════════════════════
 // 고슴도치 그리기 (screen 좌표 기준)
+// img: 사용할 이미지 (null이면 폴백 원)
 // ═══════════════════════════════════════════════════════════
-function drawHedgehog(ctx, sx, sy, angle, r, alpha = 1, scale = 1) {
+function drawHedgehog(ctx, sx, sy, angle, r, alpha = 1, scale = 1, img = null) {
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.translate(sx, sy);
   ctx.rotate(angle);
   ctx.scale(scale, scale);
 
-  if (hogImage.complete && hogImage.naturalWidth > 0) {
-    ctx.drawImage(hogImage, -r, -r, r * 2, r * 2);
+  const image = img ?? currentWaitingImage;
+  if (image && image.complete && image.naturalWidth > 0) {
+    ctx.drawImage(image, -r, -r, r * 2, r * 2);
   } else {
+    // 폴백: 살구색 원 (로딩 전 또는 이미지 실패 시)
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fillStyle = '#E8B4A0';
@@ -356,7 +404,8 @@ function dropHedgehog(wx, wy) {
 
   World.add(world, body);
   // isFalling=true인 동안 카메라 계산 대상에서 제외
-  hedgehogs.push({ body, stableTimer: 0, counted: false, isFalling: true });
+  // image: 이 hedgehog에 고정된 이미지 (드롭 순간 확정)
+  hedgehogs.push({ body, stableTimer: 0, counted: false, isFalling: true, image: currentWaitingImage });
   latestBody = body;
 
   // 1.5초 후 또는 sleeping 감지 시 isFalling 해제
@@ -381,8 +430,9 @@ function dropHedgehog(wx, wy) {
     }
   }
 
-  // 0.5초 후 대기 고슴도치 재등장 (fade in 200ms)
+  // 0.5초 후 대기 고슴도치 재등장 (fade in 200ms) + 새 랜덤 이미지 선택
   setTimeout(() => {
+    currentWaitingImage = getRandomImage();   // 다음 hedgehog 표정 결정
     idleAlpha = 0;
     isDropped = false;
     const t0 = performance.now();
@@ -606,15 +656,15 @@ Events.on(render, 'afterRender', () => {
   // ── 가이드라인 ───────────────────────────────────────────
   drawGuideLines(ctx);
 
-  // ── 떨어진 고슴도치 (world → screen 변환: sy = worldY - camY) ──
-  for (const { body } of hedgehogs) {
-    drawHedgehog(ctx, body.position.x, body.position.y - camY, body.angle, HOG_R);
+  // ── 떨어진 고슴도치 (world → screen, 각자 고정된 이미지 사용) ──
+  for (const { body, image } of hedgehogs) {
+    drawHedgehog(ctx, body.position.x, body.position.y - camY, body.angle, HOG_R, 1, 1, image);
   }
 
   // ── 충격파 ──────────────────────────────────────────────
   drawPulses(ctx, now);
 
-  // ── 대기 / 드래그 고슴도치 ──────────────────────────────
+  // ── 대기 / 드래그 고슴도치 (currentWaitingImage 사용) ──
   if (!isDropped) {
     if (isDragging) {
       // 드래그: world → screen
@@ -622,13 +672,13 @@ Events.on(render, 'afterRender', () => {
       ctx.shadowColor   = 'rgba(0,0,0,0.10)';
       ctx.shadowBlur    = 18;
       ctx.shadowOffsetY = 7;
-      drawHedgehog(ctx, dragX, dragY - camY, 0, HOG_R, idleAlpha, 1.05);
+      drawHedgehog(ctx, dragX, dragY - camY, 0, HOG_R, idleAlpha, 1.05, currentWaitingImage);
       ctx.restore();
     } else {
       // idle: 화면 고정 위치
       const isx = idleScreenX();
       const isy = idleScreenY();
-      drawHedgehog(ctx, isx, isy, 0, HOG_R, idleAlpha, 1.0);
+      drawHedgehog(ctx, isx, isy, 0, HOG_R, idleAlpha, 1.0, currentWaitingImage);
 
       // grab 힌트 점선 링
       if (idleAlpha > 0.4) {
